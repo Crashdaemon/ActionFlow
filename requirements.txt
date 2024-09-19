@@ -1,0 +1,16 @@
+threading
+time
+json
+random
+ast
+keyboard
+mouse
+pyautogui
+pygetwindow
+customtkinter
+pynput
+pywinauto
+win32gui
+win32con
+win32api
+
