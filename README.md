@@ -5,6 +5,8 @@
 This Auto Clicker (Action Flow) is a versatile automation tool that allows users to automate repetitive tasks such as mouse clicks, key presses, and sequence of actions. It provides features like window targeting, customizable action intervals, action logging, and condition-based execution. This tool is built using Python with `customtkinter`, `keyboard`, `mouse`, `pywinauto`, and `pyautogui` libraries, and supports saving/loading presets for repetitive workflows.
 
 ## Features
+![image](https://github.com/user-attachments/assets/34b1051d-01a9-4627-b46b-10f9c6d2b9a0)
+
 - **Customizable Action Sequences:** Supports both mouse clicks and key presses, with optional delays between actions.
 - **Target Window Actions:** Allows targeting specific windows for sending inputs, such as pressing keys or clicking the mouse.
 - **Global Conditions:** Provides condition-based action execution, such as only running actions when a specific window is active.
