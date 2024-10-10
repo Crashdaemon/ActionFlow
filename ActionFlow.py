@@ -439,6 +439,7 @@ class Action:
         min_interval: Optional[float] = None,
         max_interval: Optional[float] = None,
         target_window: Optional[int] = None,
+        independent: bool = False,
     ):
         self.action_type = action_type
         self.value = value
@@ -447,6 +448,7 @@ class Action:
         self.max_interval = max_interval
         self.running = True
         self.target_window = target_window
+        self.independent = independent 
 
     def perform(self, global_condition: Optional[Condition] = None):
         print(f"Performing action: {self.action_type} - {self.value}")
@@ -792,6 +794,26 @@ class ConditionDialog(ctk.CTkToplevel):
         self.destroy()
 
 
+class ActionThread(threading.Thread):
+    def __init__(self, action, global_condition, running_event, log_callback):
+        threading.Thread.__init__(self)
+        self.action = action
+        self.global_condition = global_condition
+        self.running_event = running_event
+        self.log_callback = log_callback
+        self.daemon = True
+
+    def run(self):
+        while self.running_event.is_set():
+            if self.global_condition and not self.global_condition.is_met():
+                time.sleep(0.5)
+                continue
+
+            self.action.perform()
+            self.log_callback(self.action)
+            interval = self.action.get_interval()
+            time.sleep(interval if interval else 1.0)
+
 class AutoAction:
     def __init__(self, root: ctk.CTk):
         self.root = root
@@ -820,6 +842,8 @@ class AutoAction:
 
         self.create_widgets()
         self.load_last_preset_on_startup()
+        self.running_event = threading.Event()
+        self.action_threads: List[threading.Thread] = []
 
     def create_widgets(self):
 
@@ -1115,23 +1139,40 @@ class AutoAction:
                         print(
                             f"Failed to find target window '{action_dict['target_window_title']}': {e}"
                         )
+                        
+                interval = (
+                    float(action_dict["interval"])
+                    if action_dict.get("interval") is not None
+                    else None
+                )
+                min_interval = (
+                    float(action_dict["min_interval"])
+                    if action_dict.get("min_interval") is not None
+                    else None
+                )
+                max_interval = (
+                    float(action_dict["max_interval"])
+                    if action_dict.get("max_interval") is not None
+                    else None
+                )
                 action = Action(
                     action_type=action_dict["action_type"],
                     value=action_dict["value"],
-                    interval=action_dict.get("interval", None),
-                    min_interval=action_dict.get("min_interval", None),
-                    max_interval=action_dict.get("max_interval", None),
+                    interval=interval,
+                    min_interval=min_interval,
+                    max_interval=max_interval,
                     target_window=target_window,
+                    independent=action_dict.get("independent", False),
                 )
                 self.action_sequence.append(action)
             self.update_action_sequence_display()
             self.delay_entry.delete(0, ctk.END)
-            self.delay_entry.insert(0, preset.get("start_delay", "0.0"))
+            self.delay_entry.insert(0, str(preset.get("start_delay", "0.0")))
 
             self.repeat_option.set(preset.get("repeat_option", "infinite"))
             if self.repeat_option.get() == "custom":
                 self.repeat_count_entry.delete(0, ctk.END)
-                self.repeat_count_entry.insert(0, preset.get("repeat_count", "1"))
+                self.repeat_count_entry.insert(0, str(preset.get("repeat_count", "1")))
             self.global_condition = None
             if preset.get("global_condition", None):
                 cond = preset["global_condition"]
@@ -1191,6 +1232,8 @@ class AutoAction:
         except Exception as e:
             self.show_message("Error", f"Failed to load preset: {e}")
             print(f"Failed to load preset: {e}")
+        finally:
+            self.loading_preset = False
 
     def set_global_condition(self):
         condition_dialog = ConditionDialog(self.root)
@@ -1325,6 +1368,10 @@ class AutoAction:
                 action_text += (
                     f"Random ({action.min_interval:.2f}s - {action.max_interval:.2f}s)"
                 )
+            else:
+                action_text += "Default"
+            if action.independent:
+                action_text += " | Independent"
             self.action_listbox.insert("end", option=action_text)
 
     def start_action(self):
@@ -1344,14 +1391,96 @@ class AutoAction:
 
         self.running = True
         self.status_label.configure(text="Status: Starting...", text_color="orange")
-        self.action_thread = threading.Thread(target=self.perform_action, daemon=True)
-        self.action_thread.start()
-        print("Action thread started.")
+        self.running_event = threading.Event()
+        self.running_event.set()
+        self.action_threads = []
+
+        threading.Thread(target=self.delayed_start).start()
+
+    def delayed_start(self):
+        for i in range(int(self.start_delay), 0, -1):
+            if not self.running:
+                break
+            self.status_label.configure(
+                text=f"Starting in {i} seconds...", text_color="orange"
+            )
+            print(f"Starting in {i} seconds...")
+            time.sleep(1)
+
+        if not self.running:
+            self.status_label.configure(text="Status: Stopped", text_color="red")
+            print("Action stopped before starting.")
+            return
+
+        self.status_label.configure(text="Status: Running", text_color="green")
+        print("Action is now running.")
+
+        self.start_action_threads()
+
+    def start_action_threads(self):
+        self.running_event.set()
+        self.action_threads = []
+
+        independent_actions = [action for action in self.action_sequence if action.independent]
+        sequential_actions = [action for action in self.action_sequence if not action.independent]
+
+        for action in independent_actions:
+            action_thread = ActionThread(
+                action=action,
+                global_condition=self.global_condition,
+                running_event=self.running_event,
+                log_callback=self.update_log
+            )
+            self.action_threads.append(action_thread)
+            action_thread.start()
+
+        if sequential_actions:
+            threading.Thread(target=self.run_sequential_actions, args=(sequential_actions,)).start()
+
+    def run_sequential_actions(self, actions: List[Action]):
+        repeat = self.repeat_option.get()
+        repeat_count = 0
+        max_repeats = None
+
+        if repeat == "custom":
+            try:
+                max_repeats = int(self.repeat_count_entry.get())
+                if max_repeats <= 0:
+                    raise ValueError("Repeat count must be a positive integer.")
+            except ValueError as e:
+                self.show_message("Error", f"Invalid repeat count: {e}")
+                self.stop_action()
+                return
+
+        while self.running_event.is_set():
+            if repeat == "custom" and repeat_count >= max_repeats:
+                print("Reached maximum repeat count for sequential actions.")
+                break
+            try:
+                for action in actions:
+                    if not self.running_event.is_set():
+                        break
+                    if self.global_condition and not self.global_condition.is_met():
+                        time.sleep(0.5)
+                        continue
+                    action.perform()
+                    self.update_log(action)
+                    interval = action.get_interval()
+                    time.sleep(interval if interval else 1.0)
+                repeat_count += 1
+                if repeat == "once":
+                    print("Completed single iteration of sequential actions.")
+                    break
+            except Exception as e:
+                self.show_message("Error", f"An error occurred: {e}")
+                break
 
     def stop_action(self):
         self.running = False
+        if hasattr(self, 'running_event'):
+            self.running_event.clear()
         self.status_label.configure(text="Status: Stopped", text_color="red")
-        print("Action thread stopped.")
+        print("Action threads stopped.")
 
     def toggle_action(self):
         if self.running:
@@ -1454,6 +1583,7 @@ class AutoAction:
                     "interval": action.interval,
                     "min_interval": action.min_interval,
                     "max_interval": action.max_interval,
+                    "independent": action.independent,
                     "target_window_title": (
                         win32gui.GetWindowText(action.target_window)
                         if action.target_window
@@ -1517,8 +1647,117 @@ class AutoAction:
         if file_path:
             try:
                 self.loading_preset = True
-                self.load_preset_from_path(file_path)
+                with open(file_path, "r") as f:
+                    preset = json.load(f)
+                self.use_target_window_var.set(preset.get("use_target_window", False))
+                self.toggle_target_window_options()
+
+                self.activation_key = preset.get("activation_key", None)
+                self.activation_key_label.configure(
+                    text=(
+                        f"Activation Key: {self.activation_key}"
+                        if self.activation_key
+                        else "Activation Key: None"
+                    )
+                )
+                if self.activation_key:
+                    keyboard.add_hotkey(self.activation_key, self.toggle_action)
+
+                self.action_sequence = []
+                for action_dict in preset.get("action_sequence", []):
+                    target_window = None
+                    if action_dict.get("target_window_title"):
+                        try:
+                            windows = gw.getWindowsWithTitle(
+                                action_dict["target_window_title"]
+                            )
+                            if windows:
+                                target_window = windows[0]._hWnd
+                            else:
+                                print(
+                                    f"Target window '{action_dict['target_window_title']}' not found."
+                                )
+                        except Exception as e:
+                            print(
+                                f"Failed to find target window '{action_dict['target_window_title']}': {e}"
+                            )
+                    action = Action(
+                        action_type=action_dict["action_type"],
+                        value=action_dict["value"],
+                        interval=action_dict.get("interval", None),
+                        min_interval=action_dict.get("min_interval", None),
+                        max_interval=action_dict.get("max_interval", None),
+                        target_window=target_window,
+                        independent=action_dict.get("independent", False),
+                    )
+                    self.action_sequence.append(action)
+                self.update_action_sequence_display()
+                self.delay_entry.delete(0, ctk.END)
+                self.delay_entry.insert(0, preset.get("start_delay", "0.0"))
+
+                self.repeat_option.set(preset.get("repeat_option", "infinite"))
+                if self.repeat_option.get() == "custom":
+                    self.repeat_count_entry.delete(0, ctk.END)
+                    self.repeat_count_entry.insert(0, preset.get("repeat_count", "1"))
+                self.global_condition = None
+                if preset.get("global_condition", None):
+                    cond = preset["global_condition"]
+                    self.global_condition = Condition(cond["condition_type"], cond["value"])
+                    self.current_global_condition_label.configure(
+                        text=f"Condition: {self.global_condition.condition_type.capitalize()} ({self.global_condition.value})"
+                    )
+                else:
+                    self.current_global_condition_label.configure(
+                        text="No global condition set."
+                    )
+
+                if self.use_target_window_var.get() and preset.get("target_window_title"):
+                    try:
+                        windows = gw.getWindowsWithTitle(preset["target_window_title"])
+                        if windows:
+                            window = windows[0]
+                            self.target_window = window._hWnd
+
+                            window_list = [
+                                f"{idx + 1}. {window.title}"
+                                for idx, window in enumerate(gw.getAllWindows())
+                                if window.title
+                            ]
+                            target_title = preset["target_window_title"]
+
+                            target_index = next(
+                                (
+                                    idx
+                                    for idx, title in enumerate(
+                                        [w.split(". ", 1)[1] for w in window_list]
+                                    )
+                                    if title == target_title
+                                ),
+                                None,
+                            )
+                            if target_index is not None:
+                                self.selected_window_var.set(window_list[target_index])
+                            else:
+                                self.selected_window_var.set("Select a window")
+                        else:
+                            self.target_window = None
+                            self.selected_window_var.set("Select a window")
+                            print(
+                                f"Target window '{preset['target_window_title']}' not found."
+                            )
+                    except Exception as e:
+                        self.show_message(
+                            "Error", f"Failed to reconnect to target window: {e}"
+                        )
+                        print(f"Failed to reconnect to target window: {e}")
+                        self.target_window = None
+                        self.selected_window_var.set("Select a window")
+
+                self.toggle_repeat_count_entry()
                 print(f"Preset loaded from {file_path}")
+            except Exception as e:
+                self.show_message("Error", f"Failed to load preset: {e}")
+                print(f"Failed to load preset: {e}")
             finally:
                 self.loading_preset = False
 
@@ -1556,7 +1795,7 @@ class AutoAction:
 
         edit_window = ctk.CTkToplevel(self.root)
         edit_window.title("Edit Action")
-        edit_window.geometry("500x300")
+        edit_window.geometry("500x400")
         edit_window.resizable(False, False)
         edit_window.grab_set()
 
@@ -1585,6 +1824,8 @@ class AutoAction:
         interval_type_label.grid(row=2, column=0, padx=10, pady=(10, 0), sticky="w")
 
         interval_type_var = ctk.StringVar(value="Fixed")
+        if action.min_interval is not None and action.max_interval is not None:
+            interval_type_var.set("Randomized")
         interval_type_option = ctk.CTkOptionMenu(
             edit_window,
             variable=interval_type_var,
@@ -1638,8 +1879,15 @@ class AutoAction:
             max_interval_entry,
         )
 
+        # Add independent action checkbox
+        independent_var = ctk.BooleanVar(value=action.independent)
+        independent_checkbox = ctk.CTkCheckBox(
+            edit_window, text="Run Independently", variable=independent_var
+        )
+        independent_checkbox.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+
         button_frame = ctk.CTkFrame(edit_window)
-        button_frame.grid(row=6, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=7, column=0, columnspan=2, pady=20)
 
         save_button = ctk.CTkButton(
             button_frame,
@@ -1652,6 +1900,7 @@ class AutoAction:
                 fixed_interval_var,
                 min_interval_var,
                 max_interval_var,
+                independent_var,
                 edit_window,
             ),
         )
@@ -1758,6 +2007,7 @@ class AutoAction:
         fixed_interval_var: ctk.StringVar,
         min_interval_var: ctk.StringVar,
         max_interval_var: ctk.StringVar,
+        independent_var: ctk.BooleanVar,
         edit_window: ctk.CTkToplevel,
     ):
         try:
@@ -1785,6 +2035,7 @@ class AutoAction:
 
             self.action_sequence[index].action_type = new_action_type
             self.action_sequence[index].value = new_value
+            self.action_sequence[index].independent = independent_var.get()
 
             self.update_action_sequence_display()
             edit_window.destroy()
@@ -2056,6 +2307,9 @@ class AutoAction:
             self.update_all_actions_target_window(None)
 
     def update_log(self, action: Action):
+        self.root.after(0, self._update_log, action)
+
+    def _update_log(self, action: Action):
         if not isinstance(action, Action):
             print(f"Invalid action type: {type(action)}. Expected Action object.")
             return
@@ -2073,9 +2327,12 @@ class AutoAction:
             log_message += f" | Interval: {interval:.2f}s"
         elif action.min_interval is not None and action.max_interval is not None:
             interval = action.get_interval()
-            log_message += f" | Interval: Random ({action.min_interval:.2f}s - {action.max_interval:.2f}s) (used {interval:.2f}s)"
+            log_message += f" | Interval: Random ({action.min_interval:.2f}s - {action.max_interval:.2f}s)"
         else:
             interval = 1.0
+
+        if action.independent:
+            log_message += " | Independent"
 
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert(ctk.END, log_message + "\n")
