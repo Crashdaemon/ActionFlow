@@ -51,6 +51,7 @@ Make sure to install these libraries before running the program.
 1. **Creating Action Sequences:**
    - Add key press or mouse click actions with a set interval between them.
    - Optionally, randomize intervals between a range of values.
+   - An option to make an action act independently from the rest of the action sequence.
 
 2. **Targeted Window Actions:**
    - Enable the option to send actions to a specific window, even if it is minimized or in the background.
