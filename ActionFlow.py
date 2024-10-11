@@ -440,6 +440,7 @@ class Action:
         max_interval: Optional[float] = None,
         target_window: Optional[int] = None,
         independent: bool = False,
+        duration: Optional[float] = None,
     ):
         self.action_type = action_type
         self.value = value
@@ -449,6 +450,7 @@ class Action:
         self.running = True
         self.target_window = target_window
         self.independent = independent 
+        self.duration = duration
 
     def perform(self, global_condition: Optional[Condition] = None):
         print(f"Performing action: {self.action_type} - {self.value}")
@@ -476,13 +478,12 @@ class Action:
     def press_key(self, key_name: str):
         try:
             if not self.target_window:
-
                 mapped_key = KEY_NAME_MAPPING.get(key_name.lower(), key_name)
                 print(f"Pressing key: {mapped_key}")
                 keyboard_controller.press(mapped_key)
-                time.sleep(0.1)
+                time.sleep(self.duration if self.duration is not None else 0.1)
                 keyboard_controller.release(mapped_key)
-                print(f"Key '{mapped_key}' pressed successfully.")
+                print(f"Key '{mapped_key}' pressed for {self.duration if self.duration else 0.1} seconds.")
             else:
                 hwnd = self.target_window
                 print(f"Target hwnd: {hwnd}")
@@ -497,42 +498,26 @@ class Action:
                 scan_code = win32api.MapVirtualKey(vk_code, 0)
 
                 lParam_down = 1 | (scan_code << 16)
-
-                extended_keys = [
-                    "right",
-                    "left",
-                    "insert",
-                    "delete",
-                    "home",
-                    "end",
-                    "pageup",
-                    "pagedown",
-                    "up",
-                    "down",
-                    "left",
-                    "right",
-                ]
-                if key_name.lower() in extended_keys:
-                    lParam_down |= 1 << 24
-
                 lParam_up = 1 | (scan_code << 16) | (1 << 30) | (1 << 31)
-                if key_name.lower() in extended_keys:
-                    lParam_up |= 1 << 24
 
                 print(f"Sending WM_KEYDOWN for '{key_name}' with lParam: {lParam_down}")
-                win32gui.SendMessage(hwnd, win32con.WM_KEYDOWN, vk_code, lParam_down)
+                win32gui.PostMessage(hwnd, win32con.WM_KEYDOWN, vk_code, lParam_down)
+                time.sleep(self.duration if self.duration is not None else 0.1)
                 print(f"Sending WM_KEYUP for '{key_name}' with lParam: {lParam_up}")
-                win32gui.SendMessage(hwnd, win32con.WM_KEYUP, vk_code, lParam_up)
-                print(f"Key '{key_name}' sent to target window via SendMessage.")
+                win32gui.PostMessage(hwnd, win32con.WM_KEYUP, vk_code, lParam_up)
+                print(f"Key '{key_name}' sent to target window via PostMessage for {self.duration if self.duration else 0.1} seconds.")
         except Exception as e:
             print(f"Error pressing key '{key_name}': {e}")
+
 
     def mouse_click(self, button: str):
         try:
             if not self.target_window:
-
-                pyautogui.click(button=button)
-                print(f"Clicked mouse button: {button}")
+                print(f"Clicking mouse button: {button}")
+                mouse.press(button=button)
+                time.sleep(self.duration if self.duration is not None else 0.1)
+                mouse.release(button=button)
+                print(f"Mouse button '{button}' clicked for {self.duration if self.duration else 0.1} seconds.")
             else:
                 hwnd = self.target_window
                 print(f"Target hwnd: {hwnd}")
@@ -568,12 +553,14 @@ class Action:
                     return
 
                 print(f"Sending {msg_down} for '{button}' with lParam: {lParam}")
-                win32gui.SendMessage(hwnd, msg_down, wParam, lParam)
+                win32gui.PostMessage(hwnd, msg_down, wParam, lParam)
+                time.sleep(self.duration if self.duration is not None else 0.1)
                 print(f"Sending {msg_up} for '{button}' with lParam: {lParam}")
-                win32gui.SendMessage(hwnd, msg_up, 0, lParam)
-                print(f"Mouse '{button}' click sent to target window via SendMessage.")
+                win32gui.PostMessage(hwnd, msg_up, 0, lParam)
+                print(f"Mouse '{button}' click sent to target window via PostMessage for {self.duration if self.duration else 0.1} seconds.")
         except Exception as e:
             print(f"Error clicking mouse button '{button}': {e}")
+
 
     @staticmethod
     def is_window_valid(hwnd: int) -> bool:
@@ -1360,8 +1347,7 @@ class AutoAction:
     def update_action_sequence_display(self):
         self.action_listbox.delete_all()
         for idx, action in enumerate(self.action_sequence):
-
-            action_text = f"{idx + 1}. {action.action_type.capitalize()}: {action.value} | Interval: "
+            action_text = f"{idx + 1}. {action.action_type.capitalize()}: {action.value} | Duration: {action.duration if action.duration else 0.1}s | Interval: "
             if action.interval is not None:
                 action_text += f"{action.interval:.2f}s"
             elif action.min_interval is not None and action.max_interval is not None:
@@ -1584,6 +1570,7 @@ class AutoAction:
                     "min_interval": action.min_interval,
                     "max_interval": action.max_interval,
                     "independent": action.independent,
+                    "duration": action.duration,
                     "target_window_title": (
                         win32gui.GetWindowText(action.target_window)
                         if action.target_window
@@ -1681,14 +1668,35 @@ class AutoAction:
                             print(
                                 f"Failed to find target window '{action_dict['target_window_title']}': {e}"
                             )
+                    interval = (
+                        float(action_dict["interval"])
+                        if action_dict.get("interval") is not None
+                        else None
+                    )
+                    min_interval = (
+                        float(action_dict["min_interval"])
+                        if action_dict.get("min_interval") is not None
+                        else None
+                    )
+                    max_interval = (
+                        float(action_dict["max_interval"])
+                        if action_dict.get("max_interval") is not None
+                        else None
+                    )
+                    duration = (
+                        float(action_dict["duration"])
+                        if action_dict.get("duration") is not None
+                        else None
+                    )
                     action = Action(
                         action_type=action_dict["action_type"],
                         value=action_dict["value"],
-                        interval=action_dict.get("interval", None),
-                        min_interval=action_dict.get("min_interval", None),
-                        max_interval=action_dict.get("max_interval", None),
+                        interval=interval,
+                        min_interval=min_interval,
+                        max_interval=max_interval,
                         target_window=target_window,
                         independent=action_dict.get("independent", False),
+                        duration=duration,
                     )
                     self.action_sequence.append(action)
                 self.update_action_sequence_display()
@@ -1761,6 +1769,7 @@ class AutoAction:
             finally:
                 self.loading_preset = False
 
+
     def new_profile(self):
         self.activation_key = None
         self.activation_key_label.configure(text="Activation Key: None")
@@ -1795,7 +1804,7 @@ class AutoAction:
 
         edit_window = ctk.CTkToplevel(self.root)
         edit_window.title("Edit Action")
-        edit_window.geometry("500x400")
+        edit_window.geometry("500x450")
         edit_window.resizable(False, False)
         edit_window.grab_set()
 
@@ -1879,15 +1888,23 @@ class AutoAction:
             max_interval_entry,
         )
 
-        # Add independent action checkbox
+        duration_label = ctk.CTkLabel(edit_window, text="Duration (seconds):")
+        duration_label.grid(row=6, column=0, padx=10, pady=(10, 0), sticky="w")
+
+        duration_var = ctk.StringVar(
+            value=str(action.duration) if action.duration is not None else "0.1"
+        )
+        duration_entry = ctk.CTkEntry(edit_window, textvariable=duration_var)
+        duration_entry.grid(row=6, column=1, padx=10, pady=(10, 0), sticky="ew")
+
         independent_var = ctk.BooleanVar(value=action.independent)
         independent_checkbox = ctk.CTkCheckBox(
             edit_window, text="Run Independently", variable=independent_var
         )
-        independent_checkbox.grid(row=6, column=0, columnspan=2, pady=(10, 0))
+        independent_checkbox.grid(row=7, column=0, columnspan=2, pady=(10, 0))
 
         button_frame = ctk.CTkFrame(edit_window)
-        button_frame.grid(row=7, column=0, columnspan=2, pady=20)
+        button_frame.grid(row=8, column=0, columnspan=2, pady=20)
 
         save_button = ctk.CTkButton(
             button_frame,
@@ -1901,6 +1918,7 @@ class AutoAction:
                 min_interval_var,
                 max_interval_var,
                 independent_var,
+                duration_var,
                 edit_window,
             ),
         )
@@ -1920,6 +1938,7 @@ class AutoAction:
         cancel_button.grid(row=0, column=2, padx=10)
 
         edit_window.grid_columnconfigure(1, weight=1)
+
 
     def on_mouse_button_selected_edit(
         self, button: str, value_var: ctk.StringVar, window: ctk.CTkToplevel
@@ -2008,6 +2027,7 @@ class AutoAction:
         min_interval_var: ctk.StringVar,
         max_interval_var: ctk.StringVar,
         independent_var: ctk.BooleanVar,
+        duration_var: ctk.StringVar,
         edit_window: ctk.CTkToplevel,
     ):
         try:
@@ -2033,6 +2053,11 @@ class AutoAction:
                 self.action_sequence[index].min_interval = None
                 self.action_sequence[index].max_interval = None
 
+            duration = float(duration_var.get())
+            if duration <= 0:
+                raise ValueError("Duration must be a positive number.")
+            self.action_sequence[index].duration = duration
+
             self.action_sequence[index].action_type = new_action_type
             self.action_sequence[index].value = new_value
             self.action_sequence[index].independent = independent_var.get()
@@ -2044,6 +2069,7 @@ class AutoAction:
             self.show_message("Error", str(ve))
         except Exception as e:
             self.show_message("Error", f"Failed to edit action: {e}")
+
 
     def on_delete_action(self, index: int, edit_window: ctk.CTkToplevel):
         del self.action_sequence[index]
@@ -2333,6 +2359,9 @@ class AutoAction:
 
         if action.independent:
             log_message += " | Independent"
+            
+        if action.duration is not None:
+            log_message += f" | Duration: {action.duration:.2f}s"
 
         self.log_textbox.configure(state="normal")
         self.log_textbox.insert(ctk.END, log_message + "\n")
